@@ -1,4 +1,4 @@
-const Comment = require('../models/Comment');
+const Comment = require('../models/comment');
 
 const getComments = async ({ page, limit, sort }) => {
   const skip = (page - 1) * limit;

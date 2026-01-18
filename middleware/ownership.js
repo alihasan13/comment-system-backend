@@ -1,4 +1,4 @@
-const Comment = require('../models/Comment');
+const Comment = require('../models/comment');
 
 const checkCommentOwnership = async (req, res, next) => {
   try {
