@@ -2,30 +2,147 @@ const Comment = require('../models/Comment');
 
 const getComments = async ({ page, limit, sort }) => {
   const skip = (page - 1) * limit;
-  let sortOption = {};
   
-  switch(sort) {
-    case 'mostLiked':
-      sortOption = { likes: -1 };
-      break;
-    case 'mostDisliked':
-      sortOption = { dislikes: -1 };
-      break;
-    case 'newest':
-    default:
-      sortOption = { createdAt: -1 };
+  // Build aggregation pipeline
+  let pipeline = [
+    // Match only top-level comments
+    { $match: { parentComment: null } }
+  ];
+  
+  // Add sorting stage based on sort parameter
+  if (sort === 'mostLiked') {
+    pipeline.push({
+      $addFields: {
+        likeCount: { $size: '$likes' }
+      }
+    });
+    pipeline.push({ $sort: { likeCount: -1, createdAt: -1 } });
+  } else if (sort === 'mostDisliked') {
+    pipeline.push({
+      $addFields: {
+        dislikeCount: { $size: '$dislikes' }
+      }
+    });
+    pipeline.push({ $sort: { dislikeCount: -1, createdAt: -1 } });
+  } else {
+    // Default: newest first
+    pipeline.push({ $sort: { createdAt: -1 } });
   }
   
-  const comments = await Comment.find({ parentComment: null })
-    .populate('author', 'username avatar')
-    .populate({
-      path: 'replies',
-      populate: { path: 'author', select: 'username avatar' }
-    })
-    .sort(sortOption)
-    .skip(skip)
-    .limit(parseInt(limit));
+  // Add pagination
+  pipeline.push({ $skip: skip });
+  pipeline.push({ $limit: parseInt(limit) });
   
+  // Populate author
+  pipeline.push({
+    $lookup: {
+      from: 'users',
+      localField: 'author',
+      foreignField: '_id',
+      as: 'author'
+    }
+  });
+  pipeline.push({
+    $unwind: '$author'
+  });
+  
+  // Populate replies
+  pipeline.push({
+    $lookup: {
+      from: 'comments',
+      localField: 'replies',
+      foreignField: '_id',
+      as: 'replies'
+    }
+  });
+  
+  // Populate author for each reply
+  pipeline.push({
+    $lookup: {
+      from: 'users',
+      localField: 'replies.author',
+      foreignField: '_id',
+      as: 'replyAuthors'
+    }
+  });
+  
+  // Map reply authors back to replies
+  pipeline.push({
+    $addFields: {
+      replies: {
+        $map: {
+          input: '$replies',
+          as: 'reply',
+          in: {
+            $mergeObjects: [
+              '$$reply',
+              {
+                author: {
+                  $arrayElemAt: [
+                    {
+                      $filter: {
+                        input: '$replyAuthors',
+                        cond: { $eq: ['$$this._id', '$$reply.author'] }
+                      }
+                    },
+                    0
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  });
+  
+  // Remove temporary field
+  pipeline.push({
+    $project: {
+      replyAuthors: 0
+    }
+  });
+  
+  // Select only needed author fields
+  pipeline.push({
+    $project: {
+      content: 1,
+      author: {
+        _id: 1,
+        username: 1,
+        avatar: 1
+      },
+      parentComment: 1,
+      likes: 1,
+      dislikes: 1,
+      replies: {
+        _id: 1,
+        content: 1,
+        author: {
+          _id: 1,
+          username: 1,
+          avatar: 1
+        },
+        likes: 1,
+        dislikes: 1,
+        isEdited: 1,
+        editedAt: 1,
+        createdAt: 1,
+        updatedAt: 1
+      },
+      isEdited: 1,
+      editedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      likeCount: 1,
+      dislikeCount: 1
+    }
+  });
+  
+  // Execute aggregation
+  const comments = await Comment.aggregate(pipeline);
+  
+  // Get total count
   const total = await Comment.countDocuments({ parentComment: null });
   
   return {
@@ -34,7 +151,9 @@ const getComments = async ({ page, limit, sort }) => {
       page: parseInt(page),
       limit: parseInt(limit),
       total,
-      pages: Math.ceil(total / limit)
+      pages: Math.ceil(total / limit),
+      hasNext: page < Math.ceil(total / limit),
+      hasPrev: page > 1
     }
   };
 };
